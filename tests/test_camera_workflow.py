@@ -289,3 +289,64 @@ async def test_idle_camera_workflow_completes(env):
         h = await _start(env, cfg(idle_timeout_s=600), ChunkInput(CAM, "/c/0.mp4", base))
         summary: CameraSummary = await h.result()      # time-skipping fast-forwards the idle wait
     assert summary.ended == "idle" and summary.total_chunks == 1
+
+
+@pytest.mark.asyncio
+async def test_degraded_publishes_skipped_for_optional(monkeypatch):
+    _fake_promptsets(monkeypatch)
+    _fake_two_tier(monkeypatch, {})
+    pub: list[dict] = []
+
+    async def publish(d):
+        pub.append(d)
+    await camera.analyze_chunk(_ain(degraded=True), publish, lambda d: None,
+                               client_factory=lambda url: object())
+    st = {d["prompt_id"]: d["status"] for d in pub}
+    assert st == {"safety": "ok", "summary": "skipped"}
+
+
+
+def test_should_warm_only_for_big_prefix_and_many_prompts():
+    from vlmpipe.orchestration.segment_runner import should_warm
+    assert not should_warm("auto", 936, 5) and not should_warm("auto", 9000, 2)
+    assert should_warm("auto", 3744, 5) and should_warm("always", 1, 1) and not should_warm("never", 10**6, 9)
+
+
+def test_latency_profile_and_overrides():
+    lat = camera.sampling_params(None, False, "latency")
+    assert lat["max_frames"] == 8 and lat["max_pixels"] == 128 * 28 * 28
+    over = camera.sampling_params({"max_frames": 12}, False, "latency")        # camera set wins
+    assert over["max_frames"] == 12 and over["max_pixels"] == 128 * 28 * 28
+    assert camera.sampling_params(None, True, "balanced")["max_frames"] == 16     # degraded halves
+
+
+@pytest.mark.asyncio
+async def test_frames_removed_after_success_only(monkeypatch, tmp_path):
+    _fake_promptsets(monkeypatch)
+    _fake_two_tier(monkeypatch, {})
+    d = tmp_path / "chunk"
+    d.mkdir()
+    paths = []
+    for n in "ab":
+        (d / f"{n}.png").write_bytes(b"x")
+        paths.append(str(d / f"{n}.png"))
+
+    async def publish(x):
+        pass
+    a = _ain()
+    a.frames = FramesOut(paths, {"frame_times": [0.0, 1.0]})
+    await camera.analyze_chunk(a, publish, lambda x: None, client_factory=lambda u: object())
+    assert not d.exists()                                    # frames + empty dir gone
+    d.mkdir()
+    (d / "a.png").write_bytes(b"x")
+    a.frames = FramesOut([str(d / "a.png")], {"frame_times": [0.0]})
+    a.config.cleanup_frames = False
+    await camera.analyze_chunk(a, publish, lambda x: None, client_factory=lambda u: object())
+    assert (d / "a.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_client_is_pooled_per_loop():
+    from vlmpipe.clients import get_client
+    assert get_client("http://x/v1") is get_client("http://x/v1")
+    assert get_client("http://x/v1") is not get_client("http://y/v1")

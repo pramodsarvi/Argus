@@ -20,6 +20,20 @@ TwoTierFn = Callable[[], Awaitable[dict]]
 RESULT_METRICS = ("ttft_s", "total_s", "prompt_tokens", "cached_tokens", "completion_tokens")
 
 
+WARM_MIN_VISUAL_TOKENS = 3000
+WARM_MIN_PROMPTS = 3
+
+
+def should_warm(mode: str, visual_tokens: int, n_prompts: int) -> bool:
+    """Measured: the extra warm round trip (~0.7 s) only pays for itself with a large shared
+    prefix and several prompts; below that, firing all prompts at once is as fast or faster."""
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return visual_tokens >= WARM_MIN_VISUAL_TOKENS and n_prompts >= WARM_MIN_PROMPTS
+
+
 def segment_status(prompts: list[PromptSpec], results: list[PromptResult]) -> str:
     by_id = {r.prompt_id: r for r in results}
     req_ok = all(p.id in by_id and by_id[p.id].status == "ok" for p in prompts if p.required)
@@ -56,7 +70,9 @@ class SegmentRunner:
                     prompt_version=p.version, model=v.model)
 
     def _from_call(self, p: PromptSpec, r: dict) -> PromptResult:
-        status = "ok" if r.get("ok") else ("invalid" if not _is_transport_error(r) else "failed")
+        err = str(r.get("error") or "")
+        status = ("ok" if r.get("ok") else "timed_out" if err.startswith("deadline ")
+                  else "invalid" if not _is_transport_error(r) else "failed")
         return PromptResult(**self._base(p), status=status, output=r.get("output"),
                             error=r.get("error"),
                             metrics={**self.timing, **{k: r[k] for k in RESULT_METRICS if k in r}})
@@ -97,36 +113,49 @@ class SegmentRunner:
             res = PromptResult(**self._base(p), status="failed", error=repr(e), metrics=dict(self.timing))
         return await self._finish(res)
 
-    async def run_bundle(self, call: CallFn) -> SegmentOutcome:
+    async def run_bundle(self, call: CallFn, warm: bool = True) -> SegmentOutcome:
         todo = [p for p in self.a.plan.prompts if p.id not in self.done]
         ticker = asyncio.ensure_future(self._ticker())
         try:
             self._beat()
             if todo:
-                try:   # warm the shared prefix once; best-effort
-                    await asyncio.wait_for(call(None), timeout=self.warm_timeout_s)
-                except Exception:  # noqa: BLE001
-                    pass
+                if warm:
+                    try:   # warm the shared prefix once; best-effort
+                        await asyncio.wait_for(call(None), timeout=self.warm_timeout_s)
+                    except Exception:  # noqa: BLE001
+                        pass
                 await asyncio.gather(*[self._one(call, p) for p in todo])
         finally:
             ticker.cancel()
         return self._outcome()
 
     # ---- two-tier mode -------------------------------------------------------------------
+    async def emit_two_tier(self, r: dict) -> None:
+        """Publish one prompt's result the moment the two-tier run produces it (pass as
+        run_two_tier(on_result=...)). Idempotent per prompt."""
+        p = next((p for p in self.a.plan.prompts if p.id == r.get("prompt_id")), None)
+        if p is not None and p.id not in self.done:
+            await self._finish(self._from_call(p, r))
+
     async def run_two_tier(self, run: TwoTierFn) -> SegmentOutcome:
+        """`run` should stream results through `emit_two_tier`; anything it returns but did not
+        emit is published at the end. On overall timeout only unfinished prompts are timed_out."""
         todo = [p for p in self.a.plan.prompts if p.id not in self.done]
         ticker = asyncio.ensure_future(self._ticker())
         try:
             self._beat()
             if todo:
                 timeout = max(p.deadline_s for p in todo) + self.warm_timeout_s
+                by_id: dict = {}
+                err = None
                 try:
                     out = await asyncio.wait_for(run(), timeout=timeout)
                     by_id = {r.get("prompt_id"): r for r in out.get("results", [])}
-                    err = None
                 except asyncio.TimeoutError:
-                    by_id, err = {}, "timed_out"
+                    err = "timed_out"
                 for p in todo:
+                    if p.id in self.done:
+                        continue
                     r = by_id.get(p.id)
                     if r is not None:
                         res = self._from_call(p, r)

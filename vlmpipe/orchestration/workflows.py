@@ -160,6 +160,7 @@ class CameraWorkflow:
                     task_queue=q, start_to_close_timeout=timedelta(minutes=2), retry_policy=IO_RETRY)
             except ActivityError as e:
                 workflow.logger.error("stale marking failed for %s: %s", c.chunk_start_ts, e.cause or e)
+            self._drop_context(c)
             self._record(c, "stale", False, lag)
             return
 
@@ -171,14 +172,17 @@ class CameraWorkflow:
                 start_to_close_timeout=timedelta(minutes=5), retry_policy=IO_RETRY)
         except ActivityError as e:
             workflow.logger.error("sampling failed for %s: %s", c.chunk_start_ts, e.cause or e)
+            self._drop_context(c)
             self._record(c, "failed", degraded, lag)
             return
         if not frames.frame_paths:
+            self._drop_context(c)
             self._record(c, "empty", degraded, lag)
             return
 
         in_order = s.last_ts is None or c.chunk_start_ts > s.last_ts
-        prev = s.previous_description if in_order else None
+        adjacent = s.last_ts is not None and c.chunk_start_ts - s.last_ts <= 1.5 * dur
+        prev = s.previous_description if in_order and adjacent else None
         try:
             out: ChunkOutcome = await workflow.execute_activity(
                 "analyze_chunk", ChunkAnalyzeInput(cfg, c, frames, prev, degraded),
@@ -187,6 +191,7 @@ class CameraWorkflow:
                 retry_policy=ANALYZE_RETRY)
         except ActivityError as e:
             workflow.logger.error("analysis failed for %s: %s", c.chunk_start_ts, e.cause or e)
+            self._drop_context(c)
             self._record(c, "failed", degraded, lag)
             return
         if in_order:
@@ -195,6 +200,12 @@ class CameraWorkflow:
             s.previous_description = (d if d is not None and
                                       len(json.dumps(d, default=str)) <= cfg.max_description_bytes else None)
         self._record(c, out.status, degraded, lag)
+
+    def _drop_context(self, c: ChunkInput) -> None:
+        """A chunk we did not analyse breaks continuity: don't hand an older chunk's description
+        to the next one as if it were the previous."""
+        if self.s.last_ts is None or c.chunk_start_ts > self.s.last_ts:
+            self.s.previous_description = None
 
     def _record(self, c: ChunkInput, status: str, degraded: bool, lag: float) -> None:
         r = self.s.recent

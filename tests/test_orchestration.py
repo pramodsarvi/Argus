@@ -430,3 +430,18 @@ def test_segment_status_unit():
     assert segment_status(p, [mk("r", "ok"), mk("o", "failed")]) == "partial"
     assert segment_status(p, [mk("r", "timed_out"), mk("o", "ok")]) == "failed"
     assert segment_status(p, [mk("o", "ok")]) == "failed"            # required missing
+
+
+@pytest.mark.asyncio
+async def test_runner_two_tier_timeout_keeps_finished_results():
+    rec = Rec()
+    p = plan(PromptSpec("a", 1, "q", 10, deadline_s=0.01), PromptSpec("b", 1, "q", 10, deadline_s=0.01))
+    r = SegmentRunner(analyze_input(p, mode="two_tier"), rec.publish, rec.heartbeat, warm_timeout_s=0.05)
+
+    async def run():
+        await r.emit_two_tier(ok("a"))          # a finishes and is published immediately
+        await asyncio.sleep(5)                  # b hangs past the overall timeout
+    out = await r.run_two_tier(run)
+    st = {x.prompt_id: x.status for x in out.results}
+    assert st == {"a": "ok", "b": "timed_out"}
+    assert [d["prompt_id"] for d in rec.published] == ["a", "b"]

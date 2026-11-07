@@ -15,7 +15,8 @@ from .workflows import CameraWorkflow, VideoAnalysisWorkflow
 
 
 def node_queue(hostname: str | None = None) -> str:
-    return f"node-{hostname or socket.gethostname()}"
+    # NODE_NAME (k8s downward API, spec.nodeName) is stable across pod restarts; the pod hostname is not.
+    return f"node-{hostname or os.environ.get('NODE_NAME') or socket.gethostname()}"
 
 
 def build_worker(client: Client, task_queue: str, activities: Activities,

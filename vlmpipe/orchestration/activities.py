@@ -100,7 +100,10 @@ class Activities:
         if v.analysis_mode != "bundle":
             raise ApplicationError(f"unknown analysis_mode {v.analysis_mode!r}", non_retryable=True)
         client = _client(v.base_url)
-        return await runner.run_bundle(lambda p: _call_prompt(client, v.model, a, p))
+        from .segment_runner import should_warm
+        warm = should_warm("auto", int(a.frames.stats.get("prompt_visual_tokens", 0) or 0),
+                           len(a.plan.prompts))
+        return await runner.run_bundle(lambda p: _call_prompt(client, v.model, a, p), warm=warm)
 
     # ---- camera entity workflow ------------------------------------------------------------
     @activity.defn(name="sample_chunk")
@@ -136,8 +139,8 @@ class Activities:
 
 
 def _client(base_url: str):
-    from openai import AsyncOpenAI
-    return AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    from vlmpipe.clients import get_client
+    return get_client(base_url)
 
 
 def _registry(plan: PromptPlan):

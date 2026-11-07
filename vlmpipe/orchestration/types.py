@@ -103,6 +103,11 @@ def idempotency_key(video_id: str, segment_index: int, prompt_id: str, prompt_ve
 # Defaults for 3-minute chunks: scene-adaptive, <= 32 frames x ~256 tokens ~= 8k visual tokens.
 DEFAULT_CHUNK_SAMPLING = {"strategy": "scene", "fps": 1.0, "min_fps": 0.2, "max_fps": 1.0,
                           "max_frames": 32, "max_pixels": 256 * 28 * 28}
+# Minimum-latency profile (measured on Qwen2.5-VL-7B FP8 / L40S: ~1.05 s per new video for 5
+# prompts at 8 frames x ~128 tokens, vs ~1.5 s at 16 x 256). Camera-set sampling overrides this.
+LATENCY_SAMPLING = {"strategy": "scene", "fps": 1.0, "min_fps": 0.1, "max_fps": 1.0,
+                    "max_frames": 8, "max_pixels": 128 * 28 * 28}
+PROFILES = {"balanced": DEFAULT_CHUNK_SAMPLING, "latency": LATENCY_SAMPLING}
 
 
 @dataclass
@@ -114,7 +119,12 @@ class CameraConfig:
     promptsets_path: str = "configs/promptsets.yaml"
     workdir: str = "/mnt/nvme/frames"
     chunk_seconds: float = 180.0
-    analysis_mode: str = "two_tier"      # "two_tier" (default) | "bundle"
+    analysis_mode: str = "bundle"        # "bundle" (default: concurrent prompts, measured fastest and
+                                         # most reliable on 7B) | "two_tier" (describe once, answer
+                                         # in text; only worth it with many prompts per camera)
+    profile: str = "balanced"            # "balanced" | "latency" (see PROFILES)
+    warm: str = "auto"                   # bundle: warm the prefix first? "auto" | "always" | "never"
+    cleanup_frames: bool = True          # delete sampled frames once the chunk is analysed
     input_mode: str = "images"
     hwaccel: str | None = None
     degrade_after_chunks: float = 1.0    # lag > this many chunk durations -> degrade

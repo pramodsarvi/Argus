@@ -17,7 +17,8 @@ async def main() -> None:
     ap.add_argument("--temporal", default="localhost:7233")
     ap.add_argument("--namespace", default="default")
     ap.add_argument("--config", default="configs/ingest.yaml")
-    ap.add_argument("--node", default=None, help="default: hostname")
+    ap.add_argument("--node", default=os.environ.get("NODE_NAME"),
+                    help="default: $NODE_NAME, else hostname (must match the worker's queue)")
     ap.add_argument("--frames-dir", default=os.environ.get("FRAMES_DIR"),
                     help="sampled-frames root to prune (same as worker FRAMES_DIR)")
     a = ap.parse_args()

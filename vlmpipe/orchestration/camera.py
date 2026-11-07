@@ -17,8 +17,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
-from .segment_runner import SegmentRunner
-from .types import (DEFAULT_CHUNK_SAMPLING, AnalyzeInput, CameraConfig, CameraState, ChunkAnalyzeInput,
+from .segment_runner import SegmentRunner, should_warm
+from .types import (DEFAULT_CHUNK_SAMPLING, PROFILES, AnalyzeInput, CameraConfig, CameraState, ChunkAnalyzeInput,
                     ChunkInput, ChunkOutcome, ChunkSampleInput, FramesOut, PromptPlan, PromptResult,
                     PromptSpec, SegmentInput, VideoInput, chunk_idempotency_key)
 
@@ -52,8 +52,8 @@ def plan_from_registry(reg, degraded: bool = False) -> PromptPlan:
     return PromptPlan(reg.system_text, reg.system_version, specs)
 
 
-def sampling_params(cps_sampling: dict | None, degraded: bool) -> dict:
-    p = {**DEFAULT_CHUNK_SAMPLING, **(cps_sampling or {})}
+def sampling_params(cps_sampling: dict | None, degraded: bool, profile: str = "balanced") -> dict:
+    p = {**PROFILES.get(profile, DEFAULT_CHUNK_SAMPLING), **(cps_sampling or {})}
     if degraded and p.get("max_frames"):
         p["max_frames"] = max(4, int(p["max_frames"]) // 2)
     return p
@@ -61,6 +61,35 @@ def sampling_params(cps_sampling: dict | None, degraded: bool) -> dict:
 
 def _set_tag(cps) -> str:
     return f"{cps.set_id}@{cps.set_version}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Resource limits (per worker process; sized for shared enterprise VMs, override via env)
+#   SAMPLE_CONCURRENCY  parallel ffmpeg samplings (CPU-bound)        default: min(4, cpus // 2)
+#   VLM_MAX_INFLIGHT    chunks analysed at once against the replica   default: 4
+# Without these, N cameras whose chunks land together start N ffmpegs and N prompt fan-outs at
+# once, which thrashes the CPU and the replica's KV/prefix cache.
+# ---------------------------------------------------------------------------------------------
+_LIMITS: dict[tuple[str, int], asyncio.Semaphore] = {}
+
+
+def _limit(name: str, default: int) -> asyncio.Semaphore:
+    key = (name, id(asyncio.get_running_loop()))      # semaphores must not cross event loops
+    sem = _LIMITS.get(key)
+    if sem is None:
+        if len(_LIMITS) > 16:
+            _LIMITS.clear()
+        env = os.environ.get(name.upper())
+        sem = _LIMITS[key] = asyncio.Semaphore(max(1, int(env) if env else default))
+    return sem
+
+
+def sample_limit() -> asyncio.Semaphore:
+    return _limit("sample_concurrency", max(1, min(4, (os.cpu_count() or 2) // 2)))
+
+
+def vlm_limit() -> asyncio.Semaphore:
+    return _limit("vlm_max_inflight", 4)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -111,11 +140,12 @@ async def sample_chunk(s: ChunkSampleInput) -> FramesOut:
         cps_sampling = resolve_prompt_set(cfg.promptsets_path, cfg.camera_id).sampling
     except ImportError:
         cps_sampling = None
-    p = sampling_params(cps_sampling, s.degraded)
+    p = sampling_params(cps_sampling, s.degraded, cfg.profile)
     out = Path(cfg.workdir) / cfg.camera_id / f"{c.chunk_start_ts:.0f}"
     kw = {k: p[k] for k in ("strategy", "scene_threshold", "min_fps", "max_fps", "max_frames") if k in p}
-    frames, stats = await asyncio.to_thread(
-        sample_frames, c.chunk_path, out, p.get("fps", 1.0), p["max_pixels"], cfg.hwaccel, **kw)
+    async with sample_limit():
+        frames, stats = await asyncio.to_thread(
+            sample_frames, c.chunk_path, out, p.get("fps", 1.0), p["max_pixels"], cfg.hwaccel, **kw)
     stats.update(camera_id=cfg.camera_id, chunk_start_ts=c.chunk_start_ts,
                  segment_start_s=0.0, degraded=s.degraded)
     return FramesOut([str(f.path) for f in frames], stats)
@@ -124,6 +154,32 @@ async def sample_chunk(s: ChunkSampleInput) -> FramesOut:
 async def analyze_chunk(a: ChunkAnalyzeInput, publish: Callable, heartbeat: Callable,
                         resumed: list[dict] | None = None, heartbeat_every_s: float = 10.0,
                         client_factory: Callable | None = None) -> ChunkOutcome:
+    async with vlm_limit():
+        out = await _analyze_chunk(a, publish, heartbeat, resumed, heartbeat_every_s, client_factory)
+    if a.config.cleanup_frames:      # only on success: a retried attempt needs the frames
+        _remove_frames(a.frames.frame_paths)
+    return out
+
+
+def _remove_frames(paths: list[str]) -> None:
+    """Frames are only needed until the replica has read them (the retention sweep is the
+    fallback). Removes the per-chunk directory if it ends up empty."""
+    dirs = set()
+    for f in paths:
+        try:
+            Path(f).unlink()
+        except OSError:
+            pass
+        dirs.add(Path(f).parent)
+    for d in dirs:
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+
+async def _analyze_chunk(a: ChunkAnalyzeInput, publish: Callable, heartbeat: Callable,
+                         resumed, heartbeat_every_s, client_factory) -> ChunkOutcome:
     cfg = a.config
     cps = resolve_prompt_set(cfg.promptsets_path, cfg.camera_id)
     plan = plan_from_registry(cps.registry, a.degraded)
@@ -131,6 +187,15 @@ async def analyze_chunk(a: ChunkAnalyzeInput, publish: Callable, heartbeat: Call
                          heartbeat_every_s=heartbeat_every_s)
     client = (client_factory or _client)(cfg.base_url)
     description: dict | None = None
+    if a.degraded:
+        # Tell the results assembler the dropped optional prompts will never arrive, so it
+        # doesn't hold the chunk until its timeout (alerts matter most when we're behind).
+        kept_ids = {s.id for s in plan.prompts}
+        for p in plan_from_registry(cps.registry).prompts:
+            if p.id not in kept_ids:
+                await publish(asdict(PromptResult(
+                    **chunk_base(cfg, a.chunk, cps, p), status="skipped",
+                    error="skipped: degraded mode (optional prompt)", metrics=chunk_metrics(a, cps))))
 
     if cfg.analysis_mode == "two_tier":
         from vlmpipe.twotier import run_two_tier
@@ -144,7 +209,9 @@ async def analyze_chunk(a: ChunkAnalyzeInput, publish: Callable, heartbeat: Call
                                      input_mode=cfg.input_mode,
                                      fps=float(a.frames.stats.get("fps", 1.0) or 1.0),
                                      previous_description=a.previous_description,
-                                     routing_overrides=cps.routing or None)
+                                     routing_overrides=cps.routing or None,
+                                     on_result=runner.emit_two_tier,
+                                     deadlines={s.id: s.deadline_s for s in plan.prompts})
             d = out.get("description")
             description = d if isinstance(d, dict) else None
             return out
@@ -153,7 +220,9 @@ async def analyze_chunk(a: ChunkAnalyzeInput, publish: Callable, heartbeat: Call
         from .activities import _call_prompt
         v = runner.a.segment.video
         ai = AnalyzeInput(SegmentInput(v, int(a.chunk.chunk_start_ts), a.chunk.chunk_path), plan, a.frames)
-        seg = await runner.run_bundle(lambda p: _call_prompt(client, cfg.model, ai, p))
+        warm = should_warm(cfg.warm, int(a.frames.stats.get("prompt_visual_tokens", 0) or 0),
+                           len(plan.prompts))
+        seg = await runner.run_bundle(lambda p: _call_prompt(client, cfg.model, ai, p), warm=warm)
     else:
         raise ValueError(f"unknown analysis_mode {cfg.analysis_mode!r}")
 
@@ -186,8 +255,8 @@ async def mark_chunk_stale(s: ChunkSampleInput, publish: Callable, lag_s: float)
 
 
 def _client(base_url: str):
-    from openai import AsyncOpenAI
-    return AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+    from vlmpipe.clients import get_client
+    return get_client(base_url)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -200,6 +269,7 @@ def default_config(camera_id: str, node: str, **overrides) -> CameraConfig:
         "promptsets_path": os.environ.get("PROMPTSETS_PATH"),
         "workdir": os.environ.get("FRAMES_DIR"),
         "analysis_mode": os.environ.get("ANALYSIS_MODE"),
+        "profile": os.environ.get("PROFILE"),
     }.items() if v}
     if os.environ.get("CHUNK_SECONDS"):
         env["chunk_seconds"] = float(os.environ["CHUNK_SECONDS"])
