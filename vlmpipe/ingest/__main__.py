@@ -1,5 +1,6 @@
 """python -m vlmpipe.ingest --inbox /mnt/nvme/inbox --temporal host:7233 --config configs/ingest.yaml"""
 import argparse
+import os
 import asyncio
 import logging
 from pathlib import Path
@@ -17,6 +18,8 @@ async def main() -> None:
     ap.add_argument("--namespace", default="default")
     ap.add_argument("--config", default="configs/ingest.yaml")
     ap.add_argument("--node", default=None, help="default: hostname")
+    ap.add_argument("--frames-dir", default=os.environ.get("FRAMES_DIR"),
+                    help="sampled-frames root to prune (same as worker FRAMES_DIR)")
     a = ap.parse_args()
     cfg = yaml.safe_load(Path(a.config).read_text()) if Path(a.config).exists() else {}
     logging.basicConfig(level=cfg.get("log_level", "INFO"))
@@ -30,8 +33,11 @@ async def main() -> None:
 
     kw = {k: cfg[k] for k in ("stable_s", "pattern", "fallback", "max_attempts",
                               "backoff_base_s", "backoff_max_s") if k in cfg}
+    from .retention import RetentionPolicy, RetentionTimer
+    policy = RetentionPolicy(**(cfg.get("retention") or {}))
     w = Watcher(a.inbox, submit, work_root=a.work_root, node=a.node, **kw)
-    await w.run_forever(cfg.get("poll_s", 2.0))
+    await w.run_forever(float(cfg.get("poll_s", 2.0)),
+                        retention=RetentionTimer(w, policy, a.frames_dir))
 
 
 if __name__ == "__main__":

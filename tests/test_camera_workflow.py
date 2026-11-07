@@ -279,3 +279,13 @@ def test_cap_description():
     assert camera.cap_description({"a": "x" * 10}, 100) == {"a": "x" * 10}
     assert camera.cap_description({"a": "x" * 1000}, 100) is None
     assert camera.cap_description(None, 100) is None
+
+
+@pytest.mark.asyncio
+async def test_idle_camera_workflow_completes(env):
+    m = Mocks()
+    base = await _now(env)
+    async with Worker(env.client, task_queue=Q, workflows=[CameraWorkflow], activities=m.acts()):
+        h = await _start(env, cfg(idle_timeout_s=600), ChunkInput(CAM, "/c/0.mp4", base))
+        summary: CameraSummary = await h.result()      # time-skipping fast-forwards the idle wait
+    assert summary.ended == "idle" and summary.total_chunks == 1

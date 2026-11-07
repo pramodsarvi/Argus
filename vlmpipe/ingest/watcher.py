@@ -189,8 +189,14 @@ class Watcher:
         self.scan()
         return await self.submit_pending()
 
-    async def run_forever(self, poll_s: float = 2.0) -> None:
+    async def run_forever(self, poll_s: float = 2.0, retention=None) -> None:
+        """retention: optional vlmpipe.ingest.retention.RetentionTimer, swept between polls."""
         while True:
+            if retention is not None:
+                try:
+                    retention.maybe_sweep()
+                except Exception:  # noqa: BLE001 - housekeeping must never stop ingest
+                    log.exception("retention sweep failed")
             try:
                 await self.step()
             except Exception:  # noqa: BLE001 - keep the watcher alive

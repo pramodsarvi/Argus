@@ -128,7 +128,16 @@ class CameraWorkflow:
             if done_this_run >= cfg.continue_as_new_after or workflow.info().is_continue_as_new_suggested():
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 workflow.continue_as_new(s)
-            await workflow.wait_condition(lambda: bool(s.pending))
+            try:
+                await workflow.wait_condition(lambda: bool(s.pending),
+                                              timeout=cfg.idle_timeout_s)
+            except asyncio.TimeoutError:
+                # Camera went quiet: finish instead of idling forever. Drain in-flight signal
+                # handlers first; if a chunk slipped in meanwhile, keep going.
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                if not s.pending:
+                    return CameraSummary(cfg.camera_id, s.total_chunks, list(s.recent), "idle")
+                continue
             if cfg.reorder_window_s > 0:
                 await workflow.sleep(cfg.reorder_window_s)      # let near-simultaneous arrivals sort
             c = s.pending.pop(0)

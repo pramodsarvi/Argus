@@ -123,6 +123,8 @@ class CameraConfig:
                                          # arrivals are sorted before the earliest is processed
     continue_as_new_after: int = 50      # chunks per run before continue-as-new
     max_chunks: int | None = None        # stop after N chunks (tests / bounded runs); None = forever
+    idle_timeout_s: float | None = 1800.0  # no chunk for this long -> workflow completes; the next
+                                           # submit_chunk (signal-with-start) starts a fresh run
     max_description_bytes: int = 16_000  # cap on carried previous description (history size)
 
 
@@ -184,6 +186,7 @@ class CameraSummary:
     camera_id: str
     total_chunks: int
     recent: list[ChunkRecord]
+    ended: str = "max_chunks"            # "max_chunks" | "idle"
 
 
 def chunk_idempotency_key(camera_id: str, chunk_start_ts: float, prompt_id: str, prompt_version: int,
