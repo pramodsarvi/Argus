@@ -111,7 +111,7 @@ flowchart TD
 **How to read it:**
 1. **Ingest:** cameras write chunks into the inbox. Each file must be written under a temporary name and renamed when complete. The watcher waits until the file is stable and readable, deduplicates it, moves it to `processing/<camera>/` and signals that camera's workflow.
 2. **Per-camera workflow:** one long-lived workflow per camera processes chunks strictly in time order. If it falls more than one chunk behind real time it degrades: half the frames, required prompts only. Beyond two chunks behind, a chunk is marked stale instead of processed late. The previous chunk's description is carried forward so events crossing chunk boundaries are caught.
-3. **Analysis:** two-tier by default. The VLM describes the chunk once. Each prompt in the camera's set is answered from that text, or, for pixel-dependent prompts, by the VLM on the cached prefix.
+3. **Analysis:** `bundle` by default: all of the camera's prompts run concurrently on the shared media prefix (a warm request is added only for large prefixes). `two_tier` is available: the VLM describes the chunk once and each prompt is answered from that text, or for pixel-dependent prompts by the VLM on the cached prefix. §11 shows why bundle is the default on a 7B model.
 4. **Results:** every answer is published per prompt, keyed by camera. The results service validates and stores it, waits until all of a chunk's prompts have arrived, then evaluates camera-level rules such as "violation in 2 chunks in a row" and sends webhooks.
 
 ---
@@ -356,3 +356,47 @@ Today the video summary is the segment summaries joined together. Instead, run a
 | Model | 3B FP8 · 7B FP8 · 7B BF16 |
 
 Pick the combination with the lowest GPU-seconds per video-minute that still passes the per-use-case accuracy gate.
+
+
+---
+
+## 11. First GPU measurements (L40S 48 GB, vLLM 0.33.0, Qwen2.5-VL-7B-Instruct FP8, 1 replica)
+
+Input: OpenCV `vtest.avi` (pedestrian surveillance, 768x576, 80 s) as two ~40 s segments, 0.5 fps, 17 frames of
+756x588 (~9.6k visual tokens), 5 prompts from `configs/prompts.yaml`. n = 2 repeats, one clip: **directional, not statistically solid**.
+
+| Mode | Prefix-cache hit | Median TTFT | Wall (5 prompts) | Valid JSON |
+|---|---|---|---|---|
+| concurrent, images | 79% | 0.8 s (2.3 s cold) | 1.5-3.0 s | 5/5 |
+| warm-then-fan-out, images | **99%** | **0.25 s** | 1.3-2.0 s (warm request 0.72 s) | 5/5 |
+| merged, images | 0% | 0.8 s | 3.3 s | 0/1 (ignores the merged schema) |
+| warm, **video** input | 98% | 0.38 s | 4.4 s | 4/5 |
+| two-tier, images | 99% | 0.25 s | 23.8 s | describe failed, all prompts fell back to visual |
+| two-tier, video | 96% | 0.16 s | 7.3 s | 4/5; 2 prompts answered by the text tier |
+
+What this says:
+- **Warm-then-fan-out is supported:** cache hits 79% -> 99% and TTFT ~3x lower. Wall time is similar, because the warm round trip costs about what it saves at 5 prompts.
+- **Guided JSON (response_format json_schema) is harmful on this model.** Default grammar: the model emits newlines until max_tokens. With `disable_any_whitespace`: schema-valid but degenerate output (`{"summary": ""}`, `"scene": ":[{"`). The default is now schema-in-prompt + tolerant parse + jsonschema validation (`STRUCTURED_MODE`, `vlmpipe/bundle.py`). Mocked tests could not have found this.
+- **Video input halves visual tokens (26k vs 49k) but** was slower (4.4 s vs 2.0 s) and in one check produced false "missing PPE" detections plus a repetition loop on a plaza scene that images mode answered correctly. Treat as unproven; do not enable without an accuracy comparison.
+- **Two-tier is not yet a win with a 7B and 5 prompts.** The describe step is the weak link: it loops or slips types (`"3"` for an integer) in image mode (22 s wasted, then every prompt falls back to the visual tier). In video mode it worked (3.5 s) but total time was 7.3 s vs 4.4 s for the plain bundle. Its advantage should appear with many more prompts per camera; measure that before relying on it.
+- **Merged prompt:** do not use with this model.
+- The model pretty-prints JSON regardless of instructions, which burns tokens and truncates long lists at `max_tokens`; budget `max_tokens` for that.
+
+Not yet measured: accuracy against labels, OCR vs JPEG quality, 3B/BF16 variants, load (cameras per GPU), the 3-minute / 32-frame operating point.
+
+### 11.1 Minimum-latency processing of one video (`bench/latency.py`)
+
+Cold prefix cache every repetition, 80 s / 768x576 clip, 5 prompts, 7B FP8 on one L40S, 3 reps, p50 end to end (decode+sample -> all 5 results):
+
+| Frames x tokens/frame | concurrent | warm-then-fan-out | decode | model |
+|---|---|---|---|---|
+| 8 x 128 (~0.9k visual tokens) | **1.05 s** | 1.12 s | 0.34 s | 0.70 s |
+| 8 x 256 | 1.54 s | 1.81 s | 0.38 s | 1.16 s |
+| 16 x 128 | 1.30 s | 1.28 s | 0.37 s | 0.94 s |
+| 16 x 256 (~3.7k) | 1.56 s | 1.44 s | 0.40 s | 1.16 s |
+
+- **Recipe for the lowest latency:** images input, 8 frames at ~128 tokens/frame, all prompts concurrent (no warm request), schema-in-prompt JSON. About 1.0 s per new video. The warm request only pays off at 16+ frames or many prompts.
+- **Model time is decode-bound:** ~0.15 s prefill + longest output at ~80 tok/s per sequence (the `actions` prompt, ~41 tokens, sets the critical path). Cutting output length (enums, fewer fields, tight `max_tokens`) is the next lever, ahead of cutting frames.
+- **Decode (~0.35 s here)** is near its floor: PNG/JPEG/BMP and compression level make no difference; `-hwaccel cuda` is *slower* on a short clip (0.8 s vs 0.4 s, startup cost); parallel per-frame seeking is no faster. Longer/higher-res video will cost more and may change this.
+- **Tried and rejected:** n-gram speculative decoding (no gain, worse at 16 frames); Qwen2.5-VL-3B (not faster, 2-3/5 valid JSON, hallucinated boxes instead of frame numbers).
+- Not tried: overlapping sampling with the first prefill, a smaller output schema, FP8 KV cache, a larger/better-instruction-following model at the same latency.
