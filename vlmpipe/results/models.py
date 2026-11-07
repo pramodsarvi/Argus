@@ -2,7 +2,7 @@ import json
 import time
 from dataclasses import asdict, dataclass, field, fields
 
-STATUSES = ("ok", "invalid", "failed", "timed_out", "stale")
+STATUSES = ("ok", "invalid", "failed", "timed_out", "stale", "skipped")
 
 
 @dataclass

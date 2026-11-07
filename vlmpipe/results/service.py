@@ -59,6 +59,7 @@ class ChunkAssembler:
 
 
 def build_default(rules_path: str = "configs/rules.yaml", webhook_url: str | None = None,
+                  state_store=None,
                   promptsets_path: str = "configs/promptsets.yaml",
                   cameras_path: str = "configs/cameras.yaml") -> ChunkAssembler:
     from vlmpipe.promptsets import PromptSetRegistry
@@ -74,7 +75,7 @@ def build_default(rules_path: str = "configs/rules.yaml", webhook_url: str | Non
         on_alert = lambda a: wd.send(a["camera_id"], a)          # noqa: E731
     else:
         on_alert = lambda a: log.warning("ALERT %s", a)           # noqa: E731
-    return ChunkAssembler(expected, CameraRuleEngine(load_camera_rules(rules_path)), on_alert)
+    return ChunkAssembler(expected, CameraRuleEngine(load_camera_rules(rules_path), state_store), on_alert)
 
 
 def main() -> None:
@@ -91,8 +92,8 @@ def main() -> None:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     store = PostgresStore(a.db) if a.db.startswith("postgres") else SQLiteStore(a.db)
-    asm = build_default(a.rules, a.webhook)
-    run_kafka_consumer(a.bootstrap, a.topics, store, default_schemas(), on_record=asm.add)
+    asm = build_default(a.rules, a.webhook, state_store=store)
+    run_kafka_consumer(a.bootstrap, a.topics, store, default_schemas(), on_record=asm.add, on_idle=asm.sweep)
 
 
 if __name__ == "__main__":

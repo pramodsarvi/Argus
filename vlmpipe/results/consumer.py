@@ -76,7 +76,8 @@ def process_message(value: bytes, store, schemas) -> ResultRecord:
 
 def run_kafka_consumer(bootstrap: str, topics: list[str], store, schemas,
                        group_id: str = "vlm-results-store", on_record=None,
-                       stop=lambda: False, dlq_topic: str | None = "vlm.results.dlq") -> None:
+                       stop=lambda: False, dlq_topic: str | None = "vlm.results.dlq",
+                       on_idle=None) -> None:
     """At-least-once: commit only after upsert, or after a poison message is parked in the DLQ."""
     from confluent_kafka import Consumer
     c = Consumer({"bootstrap.servers": bootstrap, "group.id": group_id,
@@ -90,6 +91,11 @@ def run_kafka_consumer(bootstrap: str, topics: list[str], store, schemas,
         while not stop():
             msg = c.poll(1.0)
             if msg is None:
+                if on_idle:                    # e.g. flush timed-out chunks when traffic stops
+                    try:
+                        on_idle()
+                    except Exception:  # noqa: BLE001 - housekeeping must not stop the consumer
+                        log.exception("on_idle failed")
                 continue
             if msg.error():
                 log.warning("kafka error: %s", msg.error())

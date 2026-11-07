@@ -23,6 +23,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS vlm_results_camera_ts ON vlm_results (camera_id, chunk_start_ts)",
     "CREATE INDEX IF NOT EXISTS vlm_results_video ON vlm_results (video_id)",
 )
+_RULE_STATE_DDL = """CREATE TABLE IF NOT EXISTS camera_rule_state (
+  camera_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated DOUBLE PRECISION)"""
 _UPDATE = ", ".join(f"{c}=excluded.{c}" for c in _COLS)
 
 
@@ -43,6 +45,21 @@ def _rec(row) -> ResultRecord:
 
 class _SQLStore:
     ph = "?"
+
+    # --- camera rule-engine state (streaks / cooldowns / last chunk), see camera_rules.py ---
+    def load_rule_state(self, camera_id: str) -> dict | None:
+        row = self.conn.execute(
+            f"SELECT state FROM camera_rule_state WHERE camera_id={self.ph}", (camera_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_rule_state(self, camera_id: str, state: dict) -> None:
+        import time
+        self.conn.execute(
+            f"INSERT INTO camera_rule_state (camera_id, state, updated) VALUES "
+            f"({self.ph}, {self.ph}, {self.ph}) ON CONFLICT (camera_id) DO UPDATE SET "
+            f"state=excluded.state, updated=excluded.updated", (camera_id, json.dumps(state), time.time()))
+        if hasattr(self.conn, "commit"):
+            self.conn.commit()
 
     def _upsert_sql(self) -> str:
         cols = ("rkey",) + _COLS
@@ -69,6 +86,7 @@ class SQLiteStore(_SQLStore):
     def _migrate(self) -> None:
         c = self.conn
         c.execute(_DDL)
+        c.execute(_RULE_STATE_DDL)
         have = {r[1] for r in c.execute("PRAGMA table_info(vlm_results)")}
         for col, typ in _NEW_COLS.items():
             if col not in have:
@@ -102,6 +120,7 @@ class PostgresStore(_SQLStore):
         import psycopg
         self.conn = psycopg.connect(dsn, autocommit=True)
         self.conn.execute(_DDL)
+        self.conn.execute(_RULE_STATE_DDL)
         for col, typ in _NEW_COLS.items():
             self.conn.execute(f"ALTER TABLE vlm_results ADD COLUMN IF NOT EXISTS {col} {typ}")
         self.conn.execute("UPDATE vlm_results SET rkey = concat_ws('|', video_id, segment_idx, "

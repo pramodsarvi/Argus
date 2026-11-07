@@ -91,14 +91,42 @@ class _State:
     last_alert: dict = field(default_factory=dict)                          # rule -> ts
 
 
+def _dump(s: _State) -> dict:
+    return {"last_ts": s.last_ts, "streak": dict(s.streak),
+            "hits": {k: list(v) for k, v in s.hits.items()}, "last_alert": dict(s.last_alert)}
+
+
+def _load(d: dict) -> _State:
+    s = _State(last_ts=d.get("last_ts"))
+    s.streak.update(d.get("streak") or {})
+    for k, v in (d.get("hits") or {}).items():
+        s.hits[k] = deque(v)
+    s.last_alert.update(d.get("last_alert") or {})
+    return s
+
+
 class CameraRuleEngine:
-    def __init__(self, rules: list[dict]) -> None:
+    """state_store (optional): object with load_rule_state(camera_id) -> dict | None and
+    save_rule_state(camera_id, dict) (the SQLite/Postgres stores). With it, streaks, cooldowns
+    and the last-seen chunk survive restarts. State is saved after each observed chunk, BEFORE
+    alerts are delivered: a crash in between loses that alert (at-most-once) rather than
+    repeating it. Use one engine/consumer instance per camera set (state is not shared live)."""
+
+    def __init__(self, rules: list[dict], state_store=None) -> None:
         self.rules = rules
+        self.store = state_store
         self.state: dict[str, _State] = defaultdict(_State)
         self.skipped = 0
 
+    def _state_for(self, camera_id: str) -> _State:
+        if camera_id not in self.state and self.store is not None:
+            d = self.store.load_rule_state(camera_id)
+            if d is not None:
+                self.state[camera_id] = _load(d)
+        return self.state[camera_id]
+
     def observe(self, chunk: Chunk) -> list[dict]:
-        s = self.state[chunk.camera_id]
+        s = self._state_for(chunk.camera_id)
         ts = chunk.chunk_start_ts
         if s.last_ts is not None and ts <= s.last_ts:
             self.skipped += 1
@@ -137,6 +165,8 @@ class CameraRuleEngine:
                            "severity": rule.get("severity", "info"),
                            "camera_id": chunk.camera_id, "chunk_start_ts": ts,
                            "message": rule.get("message", rid), **detail})
+        if self.store is not None:
+            self.store.save_rule_state(chunk.camera_id, _dump(s))
         return alerts
 
     def observe_records(self, records: list[ResultRecord]) -> list[dict]:

@@ -354,3 +354,17 @@ def test_bad_camera_rules_rejected(tmp_path):
         p = tmp_path / "r.yaml"; p.write_text(body)
         with pytest.raises(ValueError):
             load_camera_rules(p)
+
+
+def test_rule_state_survives_restart(tmp_path):
+    rules = [r for r in CAM_RULES if r["id"] == "persistent_safety_violation"]
+    db = str(tmp_path / "r.db")
+    s1 = SQLiteStore(db)
+    assert CameraRuleEngine(rules, s1).observe(ch(0, V)) == []        # streak 1, then "crash"
+    s2 = SQLiteStore(db)
+    eng = CameraRuleEngine(rules, s2)                                 # fresh process
+    assert eng.observe(ch(0, V)) == [] and eng.skipped == 1           # redelivery ignored
+    a = eng.observe(ch(180, V))
+    assert _ids(a) == ["persistent_safety_violation"] and a[0]["streak"] == 2
+    eng3 = CameraRuleEngine(rules, SQLiteStore(db))                   # restart again: cooldown kept
+    assert eng3.observe(ch(360, V)) == []
