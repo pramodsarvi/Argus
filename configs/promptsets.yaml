@@ -1,0 +1,176 @@
+# Per-camera prompt sets. shared_system is GLOBAL (one per file): it is part of the cached media
+# prefix and of the two-tier describe call, so it must be identical across all sets.
+shared_system:
+  version: 1
+  text: >-
+    You are a video analysis system. You are given frames sampled from a video segment,
+    in chronological order. Answer only the question asked, using only what is visible.
+
+# Prompt library: referenced by id from sets. Optional keys: required (default true),
+# deadline_s (default 180), tier ("text"|"visual", two-tier routing hint).
+library:
+  - id: safety
+    version: 1
+    max_tokens: 256
+    tier: visual
+    text: >-
+      List any safety violations visible (missing PPE, unsafe proximity to machinery,
+      blocked exits, spills). Give the frame number for each.
+    schema:
+      type: object
+      properties:
+        violations:
+          type: array
+          items:
+            type: object
+            properties:
+              type: {type: string}
+              frame: {type: integer}
+              description: {type: string}
+            required: [type, frame, description]
+      required: [violations]
+
+  - id: ocr
+    version: 1
+    max_tokens: 384
+    tier: visual
+    required: false
+    text: Transcribe all clearly legible text (signs, labels, screens). Give the frame number for each.
+    schema:
+      type: object
+      properties:
+        texts:
+          type: array
+          items:
+            type: object
+            properties:
+              frame: {type: integer}
+              text: {type: string}
+            required: [frame, text]
+      required: [texts]
+
+  - id: actions
+    version: 1
+    max_tokens: 192
+    tier: text
+    text: List the distinct human actions taking place, with start and end frame numbers.
+    schema:
+      type: object
+      properties:
+        actions:
+          type: array
+          items:
+            type: object
+            properties:
+              action: {type: string}
+              start_frame: {type: integer}
+              end_frame: {type: integer}
+            required: [action, start_frame, end_frame]
+      required: [actions]
+
+  - id: anomaly
+    version: 1
+    max_tokens: 128
+    tier: text
+    text: Is anything damaged, abnormal or out of place? Answer briefly.
+    schema:
+      type: object
+      properties:
+        anomaly: {type: boolean}
+        description: {type: string}
+      required: [anomaly, description]
+
+  - id: summary
+    version: 1
+    max_tokens: 256
+    tier: text
+    required: false
+    text: Summarise what happens in this segment in 2-4 sentences.
+    schema:
+      type: object
+      properties:
+        summary: {type: string}
+      required: [summary]
+
+  - id: queue_length
+    version: 1
+    max_tokens: 96
+    tier: text
+    text: How many people are waiting in a queue? Give the maximum count and the frame where it occurs.
+    schema:
+      type: object
+      properties:
+        max_queue: {type: integer, minimum: 0}
+        frame: {type: integer}
+      required: [max_queue, frame]
+
+  - id: vehicle_count
+    version: 1
+    max_tokens: 128
+    tier: visual
+    text: Count distinct vehicles by type (car, truck, forklift, other) seen in the segment.
+    schema:
+      type: object
+      properties:
+        counts:
+          type: object
+          properties:
+            car: {type: integer, minimum: 0}
+            truck: {type: integer, minimum: 0}
+            forklift: {type: integer, minimum: 0}
+            other: {type: integer, minimum: 0}
+          required: [car, truck, forklift, other]
+      required: [counts]
+
+  - id: loitering
+    version: 1
+    max_tokens: 160
+    tier: text
+    text: >-
+      Is any person lingering in the same area without apparent purpose for most of the segment?
+      Give start and end frame numbers for each case.
+    schema:
+      type: object
+      properties:
+        cases:
+          type: array
+          items:
+            type: object
+            properties:
+              description: {type: string}
+              start_frame: {type: integer}
+              end_frame: {type: integer}
+            required: [description, start_frame, end_frame]
+      required: [cases]
+
+# Named, versioned sets. `prompts` = library ids; `inline` = set-local prompts (same fields as
+# library); `routing` = per-set two-tier overrides (prompt_id -> text|visual).
+sets:
+  general:
+    version: 1
+    prompts: [anomaly, summary]
+
+  warehouse_dock:
+    version: 1
+    prompts: [safety, vehicle_count, ocr, anomaly, summary]
+
+  retail_entrance:
+    version: 1
+    prompts: [queue_length, loitering, summary]
+    routing: {queue_length: visual}
+
+  production_line:
+    version: 1
+    prompts: [safety, actions, anomaly]
+    inline:
+      - id: line_stopped
+        version: 1
+        max_tokens: 64
+        tier: visual
+        text: Is the production line stopped at any point? Give the first frame where it is stopped.
+        schema:
+          type: object
+          properties:
+            stopped: {type: boolean}
+            first_frame: {type: [integer, "null"]}
+          required: [stopped, first_frame]

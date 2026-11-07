@@ -1,0 +1,50 @@
+# Cross-prompt rules, evaluated per segment over {prompt_id: validated output}.
+# ops: nonempty | empty | eq | ne | gt | contains ; paths are prompt_id.field[.field]
+rules:
+  - id: safety_with_anomaly
+    severity: high
+    message: Safety violation coinciding with a detected anomaly
+    all:
+      - {path: safety.violations, op: nonempty}
+      - {path: anomaly.anomaly, op: eq, value: true}
+
+  - id: safety_violation
+    severity: medium
+    message: Safety violation detected
+    all:
+      - {path: safety.violations, op: nonempty}
+
+  - id: anomaly_only
+    severity: low
+    message: Anomaly detected without safety violation
+    all:
+      - {path: anomaly.anomaly, op: eq, value: true}
+      - {path: safety.violations, op: empty}
+
+# Camera-level temporal rules, evaluated per camera over consecutive chunks (~3 min each).
+# See vlmpipe/results/camera_rules.py. Times are in chunk time (chunk_start_ts, UTC epoch s).
+#   break_on:  chunk statuses that reset streaks / don't count (default [stale, failed])
+#   max_gap_s: reset a consecutive streak if chunks are missing for longer than this
+#   cooldown_s: suppress repeat alerts for the same (camera, rule)
+camera_rules:
+  - id: persistent_safety_violation
+    type: consecutive
+    k: 2
+    severity: high
+    message: Safety violations in 2 consecutive chunks
+    max_gap_s: 300
+    cooldown_s: 900
+    condition:
+      all:
+        - {path: safety.violations, op: nonempty}
+
+  - id: recurring_anomaly
+    type: window
+    count: 3
+    window_s: 1800
+    severity: medium
+    message: Anomaly in 3+ chunks within 30 minutes
+    cooldown_s: 1800
+    condition:
+      all:
+        - {path: anomaly.anomaly, op: eq, value: true}

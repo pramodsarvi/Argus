@@ -1,0 +1,7 @@
+# One vLLM replica per GPU (PCIe, no tensor parallel). `node` must match the node label the
+# frame store reports in FramesReady, so routing stays node-local.
+replicas:
+  - {name: pro6000-a-g0, node: gpu-node-a, gpu: 0, url: "http://gpu-node-a:8000/v1"}
+  - {name: pro6000-a-g1, node: gpu-node-a, gpu: 1, url: "http://gpu-node-a:8001/v1"}
+  - {name: l40s-b-g0,    node: gpu-node-b, gpu: 0, url: "http://gpu-node-b:8000/v1"}
+  - {name: l40s-b-g1,    node: gpu-node-b, gpu: 1, url: "http://gpu-node-b:8001/v1"}

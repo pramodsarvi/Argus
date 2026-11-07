@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-l40s
+  namespace: vlmpipe
+  labels: {app: vllm, gpu: l40s}
+spec:
+  replicas: 1            # one replica per GPU (PCIe, no tensor parallel)
+  selector: {matchLabels: {app: vllm, gpu: l40s}}
+  template:
+    metadata:
+      labels: {app: vllm, gpu: l40s}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8000", prometheus.io/path: /metrics}
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-L40S   # GPU Feature Discovery label; verify value on your nodes
+      topologySpreadConstraints:
+        - {maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway,
+           labelSelector: {matchLabels: {app: vllm, gpu: l40s}}}
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model=Qwen/Qwen2.5-VL-7B-Instruct
+            - --port=8000
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --allowed-local-media-path=/frames
+            - '--limit-mm-per-prompt={"image": 64}'
+            - --max-model-len=32768
+            - --gpu-memory-utilization=0.85
+            - --quantization=fp8
+          env:
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
+          ports: [{containerPort: 8000, name: http}]
+          resources:
+            limits: {nvidia.com/gpu: 1}
+            requests: {cpu: "8", memory: 48Gi}
+          readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 10, failureThreshold: 3}
+          startupProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 10, failureThreshold: 90}
+          volumeMounts:
+            - {name: frames, mountPath: /frames, readOnly: true}
+            - {name: hf-cache, mountPath: /root/.cache/huggingface}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: frames, hostPath: {path: /mnt/nvme/frames, type: DirectoryOrCreate}}
+        - {name: hf-cache, hostPath: {path: /mnt/nvme/hf-cache, type: DirectoryOrCreate}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 16Gi}}

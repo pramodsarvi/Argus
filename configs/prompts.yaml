@@ -1,0 +1,84 @@
+# Versioned prompt registry. Everything here goes AFTER the shared media prefix.
+# Changing shared_system invalidates every cached prefix - bump its version deliberately.
+shared_system:
+  version: 1
+  text: >-
+    You are a video analysis system. You are given frames sampled from a video segment,
+    in chronological order. Answer only the question asked, using only what is visible.
+
+prompts:
+  - id: safety
+    version: 1
+    max_tokens: 256
+    text: >-
+      List any safety violations visible (missing PPE, unsafe proximity to machinery,
+      blocked exits, spills). Give the frame number for each.
+    schema:
+      type: object
+      properties:
+        violations:
+          type: array
+          items:
+            type: object
+            properties:
+              type: {type: string}
+              frame: {type: integer}
+              description: {type: string}
+            required: [type, frame, description]
+      required: [violations]
+
+  - id: ocr
+    version: 1
+    max_tokens: 384
+    text: Transcribe all clearly legible text (signs, labels, screens). Give the frame number for each.
+    schema:
+      type: object
+      properties:
+        texts:
+          type: array
+          items:
+            type: object
+            properties:
+              frame: {type: integer}
+              text: {type: string}
+            required: [frame, text]
+      required: [texts]
+
+  - id: actions
+    version: 1
+    max_tokens: 192
+    text: List the distinct human actions taking place, with start and end frame numbers.
+    schema:
+      type: object
+      properties:
+        actions:
+          type: array
+          items:
+            type: object
+            properties:
+              action: {type: string}
+              start_frame: {type: integer}
+              end_frame: {type: integer}
+            required: [action, start_frame, end_frame]
+      required: [actions]
+
+  - id: anomaly
+    version: 1
+    max_tokens: 128
+    text: Is anything damaged, abnormal or out of place? Answer briefly.
+    schema:
+      type: object
+      properties:
+        anomaly: {type: boolean}
+        description: {type: string}
+      required: [anomaly, description]
+
+  - id: summary
+    version: 1
+    max_tokens: 256
+    text: Summarise what happens in this segment in 2-4 sentences.
+    schema:
+      type: object
+      properties:
+        summary: {type: string}
+      required: [summary]

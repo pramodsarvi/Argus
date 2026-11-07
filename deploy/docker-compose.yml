@@ -1,0 +1,113 @@
+# Single GPU node: vLLM + worker share /mnt/nvme/frames (hostPath-equivalent bind mount).
+# Usage: FRAMES_DIR=/mnt/nvme/frames docker compose -f deploy/docker-compose.yml up -d
+name: vlmpipe
+
+x-frames: &frames
+  type: bind
+  source: ${FRAMES_DIR:-/mnt/nvme/frames}
+  target: /frames
+
+services:
+  vllm:
+    image: vllm/vllm-openai:${VLLM_TAG:-latest}
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_SERVER_DEV_MODE: ${DEV_MODE:-0}   # 1 only for the spike (/reset_prefix_cache)
+    command:
+      - --model=${MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --port=8000
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --allowed-local-media-path=/frames
+      - '--limit-mm-per-prompt={"image": ${MAX_FRAMES:-64}}'
+      - --max-model-len=${MAX_LEN:-32768}
+      - --gpu-memory-utilization=${GPU_UTIL:-0.85}
+      - --quantization=${QUANT:-fp8}
+    volumes:
+      - *frames
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    ports: ["8000:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${GPU:-0}"], capabilities: [gpu]}]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+
+  worker:
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.worker}
+    environment:
+      VLLM_BASE_URL: http://vllm:8000/v1
+      MODEL: ${MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      FRAMES_DIR: /frames
+      TEMPORAL_ADDRESS: temporal:7233
+      KAFKA_BOOTSTRAP: kafka:9092
+      DATABASE_URL: postgresql://vlm:vlm@postgres:5432/vlm
+      METRICS_PORT: "9100"
+      OTEL_SERVICE_NAME: vlmpipe-worker
+    volumes: [*frames]
+    ports: ["9100:9100"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, device_ids: ["${GPU:-0}"], capabilities: [gpu, video]}]
+    depends_on:
+      vllm: {condition: service_healthy}
+      temporal: {condition: service_started}
+      kafka: {condition: service_started}
+      postgres: {condition: service_healthy}
+
+  temporal:
+    image: temporalio/temporal:${TEMPORAL_TAG:-latest}
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    volumes: [temporal-data:/data]
+    ports: ["7233:7233", "8233:8233"]
+
+  kafka:
+    image: apache/kafka:${KAFKA_TAG:-3.8.0}
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 12
+    volumes: [kafka-data:/var/lib/kafka/data]
+
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_USER: vlm, POSTGRES_PASSWORD: vlm, POSTGRES_DB: vlm}
+    volumes: [pg-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vlm"]
+      interval: 5s
+      retries: 20
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes: [./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+
+volumes:
+  temporal-data:
+  kafka-data:
+  pg-data:

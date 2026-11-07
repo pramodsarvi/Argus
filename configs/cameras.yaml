@@ -1,0 +1,22 @@
+# Camera -> prompt set. Precedence: cameras (explicit) > first matching group (glob) > defaults.
+# sampling is merged defaults < group < camera.
+defaults:
+  set: general
+  sampling: {strategy: scene, min_fps: 0.2, max_fps: 1.0, max_frames: 32}
+
+groups:
+  - match: "dock-*"
+    set: warehouse_dock
+    sampling: {max_frames: 40}
+  - match: "entrance-*"
+    set: retail_entrance
+  - match: "line-*"
+    set: production_line
+    sampling: {min_fps: 0.33}
+
+cameras:
+  dock-07:                     # busy dock: more frames
+    set: warehouse_dock
+    sampling: {max_frames: 48}
+  lobby-main:
+    set: retail_entrance

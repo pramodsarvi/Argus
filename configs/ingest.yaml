@@ -1,0 +1,10 @@
+# Folder-watcher ingest. One ~3-min chunk per camera every 3 min.
+poll_s: 2.0
+stable_s: 10.0            # size+mtime unchanged this long => writer finished
+# Filename -> camera_id + start time. ts: 20261107T120300Z (UTC) or epoch seconds.
+pattern: '(?P<camera_id>[^_/]+)_(?P<ts>\d{8}T\d{6}Z?|\d{9,})\.(?:mp4|mkv|ts)$'
+fallback: true            # else camera_id = parent dir name, start = file mtime
+max_attempts: 8
+backoff_base_s: 5.0
+backoff_max_s: 300.0
+log_level: INFO

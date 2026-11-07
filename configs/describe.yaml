@@ -1,0 +1,124 @@
+# Two-tier analysis (design §10.1, §10.7).
+# Visual tier: ONE dense description per segment (shares the cached media prefix).
+# Text tier: use cases answered from that description; escalate to a visual call when needed.
+version: 1
+confidence_threshold: 0.6
+
+describe:
+  id: _describe
+  version: 1
+  max_tokens: 1024
+  text: >-
+    Describe this segment exhaustively and factually as JSON. Refer to frames by their
+    "Frame N" labels. Include every object, person, action (with start/end frame), all
+    legible text (with frame), and anything damaged, unsafe, abnormal or out of place.
+    Do not speculate beyond what is visible.
+  schema:
+    type: object
+    properties:
+      scene: {type: string}
+      objects:
+        type: array
+        items:
+          type: object
+          properties:
+            name: {type: string}
+            frames: {type: array, items: {type: integer}}
+            attributes: {type: string}
+          required: [name, frames]
+      people:
+        type: array
+        items:
+          type: object
+          properties:
+            description: {type: string}
+            ppe: {type: string}
+            frames: {type: array, items: {type: integer}}
+          required: [description, frames]
+      actions:
+        type: array
+        items:
+          type: object
+          properties:
+            action: {type: string}
+            start_frame: {type: integer}
+            end_frame: {type: integer}
+          required: [action, start_frame, end_frame]
+      visible_text:
+        type: array
+        items:
+          type: object
+          properties:
+            frame: {type: integer}
+            text: {type: string}
+          required: [frame, text]
+      notable_states:
+        type: array
+        items:
+          type: object
+          properties:
+            frame: {type: integer}
+            description: {type: string}
+          required: [frame, description]
+      continues_previous:
+        type: boolean
+        description: true if an event from the previous chunk is still ongoing in this chunk
+      ongoing_events:
+        type: array
+        description: events still in progress at the last frame, or continuing from the previous chunk
+        items:
+          type: object
+          properties:
+            description: {type: string}
+            from_previous: {type: boolean}
+            start_frame: {type: integer}
+            still_ongoing_at_end: {type: boolean}
+          required: [description, from_previous]
+    required: [scene, objects, people, actions, visible_text, notable_states,
+               continues_previous, ongoing_events]
+
+text_system: >-
+  You answer questions about a video segment using ONLY the provided JSON description of it.
+  If the description does not contain enough information to answer reliably, say so via a
+  low confidence value (0 = no basis, 1 = fully supported by the description).
+
+# Per-use-case routing. Prompt ids not listed here (e.g. camera-specific prompts) default to
+# visual unless the caller passes routing_overrides={prompt_id: "text"}.
+# tier=visual -> always a direct VLM call over the frames.
+# tier=text -> answered from the description; escalated to visual if confidence < threshold.
+routing:
+  safety:
+    tier: visual        # fine-grained PPE / proximity judgements need pixels
+  ocr:
+    tier: visual        # exact transcription needs pixels (and ideally high-res)
+  actions:
+    tier: text
+    question: List the distinct human actions, with start and end frame numbers.
+  anomaly:
+    tier: text
+    question: Is anything damaged, abnormal or out of place? Answer briefly.
+  summary:
+    tier: text
+    question: Summarise what happens in this segment in 2-4 sentences.
+
+reduce:
+  max_tokens: 768
+  text: >-
+    You are given ordered JSON descriptions of consecutive segments of one video, each with
+    its start time in seconds. Produce a coherent video-level summary and list events that
+    span segment boundaries or recur across segments.
+  schema:
+    type: object
+    properties:
+      summary: {type: string}
+      cross_segment_events:
+        type: array
+        items:
+          type: object
+          properties:
+            description: {type: string}
+            segments: {type: array, items: {type: integer}}
+            start_s: {type: number}
+            end_s: {type: number}
+          required: [description, segments]
+    required: [summary, cross_segment_events]

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: vlmpipe-worker, namespace: vlmpipe}
+spec:
+  selector: {matchLabels: {app: vlmpipe-worker}}
+  template:
+    metadata:
+      labels: {app: vlmpipe-worker}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "9100"}
+    spec:
+      nodeSelector: {nvidia.com/gpu.present: "true"}
+      containers:
+        - name: worker
+          image: REGISTRY/vlmpipe-worker:latest     # built from deploy/docker/Dockerfile.worker
+          env:
+            - {name: VLLM_BASE_URL, value: http://vllm-local.vlmpipe.svc:8000/v1}
+            - {name: MODEL, value: Qwen/Qwen2.5-VL-7B-Instruct}
+            - {name: FRAMES_DIR, value: /frames}
+            - {name: TEMPORAL_ADDRESS, value: temporal-frontend.temporal.svc:7233}
+            - {name: KAFKA_BOOTSTRAP, value: kafka.kafka.svc:9092}
+            - {name: METRICS_PORT, value: "9100"}
+            - name: NODE_NAME            # task-queue per node => segment->node affinity
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: vlmpipe-db, key: url}}
+            - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility,video"}
+          ports: [{containerPort: 9100, name: metrics}]
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+          # NVDEC decode: shares the node's GPUs without claiming one exclusively.
+          # If your device plugin requires a claim, use time-slicing or MIG instead.
+          volumeMounts:
+            - {name: frames, mountPath: /frames}
+      volumes:
+        - {name: frames, hostPath: {path: /mnt/nvme/frames, type: DirectoryOrCreate}}
