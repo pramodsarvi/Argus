@@ -139,12 +139,17 @@ async def run_two_tier(client, model: str, reg: Registry, frames: list,
                        input_mode: str = "images", fps: float = 1.0,
                        mm_processor_kwargs: dict | None = None,
                        previous_description: dict | str | None = None,
-                       routing_overrides: dict[str, str] | None = None) -> dict:
+                       routing_overrides: dict[str, str] | None = None,
+                       on_result=None, deadlines: dict[str, float] | None = None) -> dict:
     """Same shape as bundle.run_bundle (+ 'description', 'escalated', 'tiers').
 
     previous_description: the previous chunk's description from the same camera; added as text
         context after the media so events spanning chunk boundaries can be linked.
-    routing_overrides: prompt_id -> "text"|"visual"; overrides describe.yaml (camera prompt sets)."""
+    routing_overrides: prompt_id -> "text"|"visual"; overrides describe.yaml (camera prompt sets).
+    on_result: optional async callable(result_dict) invoked as each prompt finishes, so callers
+        can publish immediately instead of waiting for the slowest prompt.
+    deadlines: prompt_id -> seconds (measured after the describe call); a prompt exceeding it
+        yields a failed Result with error "deadline ... exceeded" and never blocks the others."""
     cfg = cfg or TwoTierConfig.load()
     thr = cfg.threshold if threshold is None else threshold
     text_client = text_client or client
@@ -176,7 +181,18 @@ async def run_two_tier(client, model: str, reg: Registry, frames: list,
             r.output.pop("confidence", None)   # keep output conformant to the prompt schema
         return r, "text", False
 
-    triples = await asyncio.gather(*[one(p) for p in prompts])
+    async def bounded(p: Prompt) -> tuple[Result, str, bool]:
+        dl = (deadlines or {}).get(p.id)
+        try:
+            t = await (asyncio.wait_for(one(p), dl) if dl else one(p))
+        except asyncio.TimeoutError:
+            t = (Result(p.id, False, None, 0.0, float(dl), 0, 0, 0, f"deadline {dl}s exceeded"),
+                 "visual", False)
+        if on_result is not None:
+            await on_result(asdict(t[0]))
+        return t
+
+    triples = await asyncio.gather(*[bounded(p) for p in prompts])
     return {"mode": "two_tier", "wall_s": time.perf_counter() - t0,
             "warm": asdict(desc), "description": description,
             "results": [asdict(r) for r, _, _ in triples],

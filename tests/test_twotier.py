@@ -238,3 +238,49 @@ def test_routing_overrides_and_unknown_prompt_default_visual():
 def test_bad_routing_override_rejected():
     with pytest.raises(ValueError):
         CFG.route("summary", {"summary": "gpu"})
+
+
+def test_run_two_tier_streams_and_enforces_deadline():
+    got = []
+    c = FakeClient(answers())
+    orig = c._create
+
+    async def create(**kw):
+        name = kw.get("response_format", {}).get("json_schema", {}).get("name")
+        if name == "ocr":                      # visual-routed prompt that hangs
+            await asyncio.sleep(5)
+        return await orig(**kw)
+    c.chat = NS(completions=NS(create=create))
+
+    async def on_result(d):
+        got.append(d["prompt_id"])
+    out = run(run_two_tier(c, "m", REG, FRAMES, cfg=CFG, on_result=on_result, deadlines={"ocr": 0.05}))
+    res = {r["prompt_id"]: r for r in out["results"]}
+    assert not res["ocr"]["ok"] and res["ocr"]["error"].startswith("deadline ")
+    assert res["safety"]["ok"] and sorted(got) == sorted(res)
+    assert got[-1] == "ocr"                    # others were emitted without waiting for it
+
+
+def test_prompt_mode_parses_fenced_json_and_validates():
+    from vlmpipe.bundle import _call, parse_json_reply, with_schema_instruction
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+    assert parse_json_reply('```json\n{"n": 3}\n```', schema) == {"n": 3}
+    assert parse_json_reply('Sure! {"n": 3} hope that helps', schema) == {"n": 3}
+    with pytest.raises(ValueError):
+        parse_json_reply('{"n": "3"}', schema)
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "file:///a"}}, {"type": "text", "text": "q"}]}]
+    out = with_schema_instruction(msgs, schema)
+    assert out[1]["content"][:2] == msgs[1]["content"] and "JSON Schema" in out[1]["content"][-1]["text"]
+    assert len(msgs[1]["content"]) == 2          # input not mutated
+
+    seen = {}
+
+    class C(FakeClient):
+        async def _create(self, **kw):
+            seen.update(kw)
+            self.answers = {"_none": '```json\n{"n": "bad"}\n```'}
+            return await super()._create(**kw)
+    c = C({})
+    r = run(_call(c, "m", msgs, 50, "p", schema, 5, structured="prompt"))
+    assert "response_format" not in seen and not r.ok and r.error.startswith("invalid json")

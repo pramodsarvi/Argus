@@ -7,10 +7,11 @@ confidence_threshold: 0.6
 describe:
   id: _describe
   version: 1
-  max_tokens: 1024
+  max_tokens: 1500
   text: >-
-    Describe this segment exhaustively and factually as JSON. Refer to frames by their
-    "Frame N" labels. Include every object, person, action (with start/end frame), all
+    Describe this segment factually as JSON. Be concise: group identical people/objects into
+    one entry, at most 12 entries per list, short phrases. Refer to frames by their
+    "Frame N" labels. Include the objects, people, actions (with start/end frame), all
     legible text (with frame), and anything damaged, unsafe, abnormal or out of place.
     Do not speculate beyond what is visible.
   schema:
