@@ -1,0 +1,22 @@
+[Unit]
+Description=vlmpipe worker
+After=network-online.target vlmpipe-vllm.service
+Requires=vlmpipe-vllm.service
+Wants=network-online.target
+
+[Service]
+User=vlmpipe
+WorkingDirectory=/opt/vlmpipe
+EnvironmentFile=/etc/vlmpipe/vlmpipe.env
+ExecStart=/opt/vlmpipe/.venv/bin/python -m vlmpipe.orchestration.worker
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/nvme
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

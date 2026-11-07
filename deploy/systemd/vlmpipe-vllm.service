@@ -1,0 +1,23 @@
+[Unit]
+Description=vLLM replica (one per GPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vlmpipe
+EnvironmentFile=/etc/vlmpipe/vlmpipe.env
+Environment=GPU=0 PORT=8000 HOST=127.0.0.1 DEV_MODE=0
+Environment=PATH=/opt/vllm_env/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/vlmpipe/scripts/serve_vllm.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/nvme/frames /var/cache/vlmpipe
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

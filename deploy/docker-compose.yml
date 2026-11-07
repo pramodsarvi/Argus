@@ -27,7 +27,7 @@ services:
     volumes:
       - *frames
       - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]   # worker is on the same host; do not expose
     deploy:
       resources:
         reservations:

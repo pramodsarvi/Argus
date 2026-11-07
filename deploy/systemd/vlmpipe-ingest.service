@@ -1,0 +1,22 @@
+[Unit]
+Description=vlmpipe ingest
+After=network-online.target vlmpipe-worker.service
+Requires=vlmpipe-worker.service
+Wants=network-online.target
+
+[Service]
+User=vlmpipe
+WorkingDirectory=/opt/vlmpipe
+EnvironmentFile=/etc/vlmpipe/vlmpipe.env
+ExecStart=/opt/vlmpipe/.venv/bin/python -m vlmpipe.ingest --inbox /mnt/nvme/inbox
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/nvme
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
